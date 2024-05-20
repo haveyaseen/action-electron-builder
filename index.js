@@ -3,6 +3,10 @@ const { existsSync, readFileSync } = require("fs");
 const { join } = require("path");
 
 /**
+ * @typedef {"linux" | "mac" | "windows"} Platform
+ */
+
+/**
  * Logs to the console
  */
 const log = (msg) => console.log(`\n${msg}`); // eslint-disable-line no-console
@@ -21,7 +25,8 @@ const exit = (msg) => {
 const run = (cmd, cwd) => execSync(cmd, { encoding: "utf8", stdio: "inherit", cwd });
 
 /**
- * Determines the current operating system (one of ["mac", "windows", "linux"])
+ * Determines the current operating system
+ * @returns {Platform}
  */
 const getPlatform = () => {
 	switch (process.platform) {
@@ -95,6 +100,43 @@ const determinePackageManager = (pkgRoot, fallback) => {
 };
 
 /**
+ * @param {PackageManager} pacMan
+ * @param {string} command
+ * @returns {string}
+ */
+const getOneOffPackageManagerCommand = (pacMan, command) => {
+	switch (pacMan) {
+		case PackageManager.PNPM:
+			return `pnpx ${command}`;
+		case PackageManager.YARN:
+			return `yarn run ${command}`;
+		default:
+			return `npx --no-install ${command}`;
+	}
+};
+
+/**
+ *
+ * @param {{
+ *   pacMan: PackageManager,
+ *   args: string,
+ *   useVueCli: boolean,
+ *   release: boolean,
+ *   platform: Platform
+ * }} opts
+ * @returns string
+ */
+const getBuildAndReleaseCommand = (opts) => {
+	const builder = opts.useVueCli ? "vue-cli-service electron:build" : "electron-builder";
+
+	const flags = `--${opts.platform} ${opts.release ? "--publish always" : ""}`;
+
+	const command = `${builder} ${flags} ${opts.args}`;
+
+	return getOneOffPackageManagerCommand(opts.pacMan, command);
+};
+
+/**
  * Installs NPM dependencies and builds/releases the Electron app
  */
 const runAction = () => {
@@ -109,8 +151,11 @@ const runAction = () => {
 	const args = getInput("args") || "";
 	const maxAttempts = Number(getInput("max_attempts") || "1");
 
-	// TODO: Deprecated option, remove in v2.0. `electron-builder` always requires a `package.json` in
-	// the same directory as the Electron app, so the `package_root` option should be used instead
+	/**
+	 * @deprecated
+	 * @todo Remove in v2.0. `electron-builder` always requires a `package.json` in
+	 * the same directory as the Electron app, so the `package_root` option should be used instead
+	 */
 	const appRoot = getInput("app_root") || pkgRoot;
 
 	const pkgJsonPath = join(pkgRoot, "package.json");
@@ -156,34 +201,34 @@ const runAction = () => {
 		log("Skipping build script because `skip_build` option is set");
 	} else {
 		log("Running the build script…");
-		if (pacMan !== PackageManager.YARN) {
-			run(`${pacMan} run --if-present ${buildScriptName}`, pkgRoot);
-		} else {
-			// TODO: Use `yarn run ${buildScriptName} --if-present` once supported
-			// https://github.com/yarnpkg/yarn/issues/6894
+		if (pacMan === PackageManager.YARN) {
+			/**
+			 * @todo Use `yarn run ${buildScriptName} --if-present` once supported
+			 * @see https://github.com/yarnpkg/yarn/issues/6894
+			 * @type {{ scripts?: { [x: string]: string } }}
+			 */
 			const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+
 			if (pkgJson.scripts && pkgJson.scripts[buildScriptName]) {
 				run(`yarn run ${buildScriptName}`, pkgRoot);
 			}
+		} else {
+			run(`${pacMan} run --if-present ${buildScriptName}`, pkgRoot);
 		}
 	}
 
 	log(`Building${release ? " and releasing" : ""} the Electron app…`);
-	let cmd;
-	const builder = useVueCli ? "vue-cli-service electron:build" : "electron-builder";
-	const flags = `--${platform} ${release ? "--publish always" : ""}`;
-
-	if (pacMan === PackageManager.NPM) {
-		cmd = "npx --no-install";
-	} else if (PackageManager.YARN) {
-		cmd = "yarn run";
-	} else {
-		cmd = "pnpx --no-install";
-	}
+	const cmd = getBuildAndReleaseCommand({
+		args,
+		release,
+		pacMan,
+		platform,
+		useVueCli,
+	});
 
 	for (let i = 0; i < maxAttempts; i += 1) {
 		try {
-			run(`${cmd} ${builder} ${flags} ${args}`, appRoot);
+			run(cmd, appRoot);
 			break;
 		} catch (err) {
 			if (i < maxAttempts - 1) {
